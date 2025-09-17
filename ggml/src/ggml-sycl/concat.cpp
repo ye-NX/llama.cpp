@@ -15,7 +15,6 @@
 static inline size_t elem_size(ggml_type t) {
     return ggml_type_size(t) / ggml_blck_size(t);
 }
-
 template <typename T>
 static void concat_T_dim0(const T *x, const T *y, T *dst,
                             const int ne0, const int ne00,
@@ -125,7 +124,7 @@ static void concat_T_sycl_non_cont(
     int64_t ne2, int64_t ne3, uint64_t nb0, uint64_t nb1, uint64_t nb2,
     uint64_t nb3, int32_t dim) {
   sycl::range<3> gridDim(ne3, ne2, ne1);
-  stream->parallel_for(sycl::nd_range<3>(gridDim, sycl::range<3>(1, 1, 1)), [=](sycl::nd_item<3> item_ct1) {
+  sycl_parallel_for(stream, sycl::nd_range<3>(gridDim, sycl::range<3>(1, 1, 1)), [=](sycl::nd_item<3> item_ct1) {
       int64_t i3 = item_ct1.get_group(0);
       int64_t i2 = item_ct1.get_group(1);
       int64_t i1 = item_ct1.get_group(2);
