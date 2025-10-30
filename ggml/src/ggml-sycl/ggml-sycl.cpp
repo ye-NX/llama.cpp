@@ -10,43 +10,43 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 
-#include <algorithm>
-#include <assert.h>
-#include <atomic>
-#include <cinttypes>
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <float.h>
-#include <limits>
-#include <stdint.h>
-#include <stdio.h>
-#include <vector>
-#include <cmath>
-#include <iostream>
-#include <fstream>
-#include <stdio.h>
-#include <stdlib.h>
-#include <regex>
-
-#include <sycl/sycl.hpp>
-#include <sycl/half_type.hpp>
-
 #include "ggml-sycl.h"
-#include "ggml-impl.h"
-#include "ggml-backend-impl.h"
 
+#include "ggml-backend-impl.h"
+#include "ggml-impl.h"
 #include "ggml-sycl/backend.hpp"
 #include "ggml-sycl/common.hpp"
 #include "ggml-sycl/element_wise.hpp"
-#include "ggml-sycl/presets.hpp"
+#include "ggml-sycl/flash-attn/flash-attn-sycl.h"
 #include "ggml-sycl/gemm.hpp"
-#include "ggml-sycl/set_rows.hpp"
-#include "ggml-sycl/set.hpp"
-#include "ggml-sycl/sycl_hw.hpp"
 #include "ggml-sycl/getrows.hpp"
+#include "ggml-sycl/presets.hpp"
 #include "ggml-sycl/quantize.hpp"
+#include "ggml-sycl/set.hpp"
+#include "ggml-sycl/set_rows.hpp"
+#include "ggml-sycl/sycl_hw.hpp"
 #include "ggml.h"
+
+#include <assert.h>
+#include <float.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cinttypes>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <regex>
+#include <sycl/half_type.hpp>
+#include <sycl/sycl.hpp>
+#include <vector>
 
 static bool g_sycl_loaded = false;
 int g_ggml_sycl_debug = 0;
@@ -3839,6 +3839,9 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
         case GGML_OP_ARGSORT:
             ggml_sycl_argsort(ctx, dst);
             break;
+        case GGML_OP_FLASH_ATTN_EXT:
+            ggml_sycl_op_flash_attn(ctx, dst);
+            break;
         case GGML_OP_TIMESTEP_EMBEDDING:
             ggml_sycl_op_timestep_embedding(ctx, dst);
             break;
@@ -4501,6 +4504,8 @@ static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_MEAN:
         case GGML_OP_ARGSORT:
             return ggml_is_contiguous(op->src[0]);
+        case GGML_OP_FLASH_ATTN_EXT:
+            return true;
         case GGML_OP_POOL_2D:
         case GGML_OP_ACC:
             return true;

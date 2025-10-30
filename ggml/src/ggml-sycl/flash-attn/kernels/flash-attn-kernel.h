@@ -1,108 +1,108 @@
 #pragma once
 
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 
-template<typename T>
-inline void run_flash_attn_block(
-    sycl::accessor<T, 1, sycl::access::mode::read> k_acc,
-    sycl::accessor<T, 1, sycl::access::mode::read> v_acc,
-    sycl::accessor<T, 1, sycl::access::mode::read> q_acc,
-    sycl::accessor<T, 1, sycl::access::mode::read_write> out_acc,
-    sycl::accessor<T, 1, sycl::access::mode::read_write> l_acc,
-    sycl::accessor<T, 1, sycl::access::mode::read_write> m_acc,
-    const size_t i,
-    const size_t j,
-    const int Br,
-    const int Bc,
-    const int N,
-    const int d,
-    const bool masked,
-    const float scale
-) {
-    // Block indices
-    const int i_start = i * Br;
-    const int j_start = j * Bc;
-    
-    // Shared memory for block multiplication
-    T S[Br][Bc] = {{0}};
-    
-    // 1. Compute S = Q * K^T for this block
+template <int Br_MAX = 32, int Bc_MAX = 32>
+inline void flash_attn_tiled_kernel(const float * Q,
+                                    const float * K,
+                                    const float * V,
+                                    float *       O,
+                                    float *       l,
+                                    float *       m,
+                                    const int     i_block,
+                                    const int     j_block,
+                                    const int     Br,
+                                    const int     Bc,
+                                    const int     N,
+                                    const int     d,
+                                    const bool    masked,
+                                    const float   scale) {
+    const int i_start = i_block * Br;
+    const int j_start = j_block * Bc;
+
+    float S[Br_MAX][Bc_MAX];
+    float P[Br_MAX][Bc_MAX];
+    float m_local[Br_MAX];
+    float l_local[Br_MAX];
+
     for (int qi = 0; qi < Br; ++qi) {
-        if (i_start + qi >= N) continue;
-        
+        const int q_row = i_start + qi;
+        if (q_row >= N) {
+            continue;
+        }
+
         for (int kj = 0; kj < Bc; ++kj) {
-            if (j_start + kj >= N) continue;
-            
-            // Skip if masked attention
-            if (masked && j_start + kj > i_start + qi) continue;
-            
-            T sum = 0;
-            for (int k = 0; k < d; ++k) {
-                int q_idx = (i_start + qi) * d + k;
-                int k_idx = (j_start + kj) * d + k;
-                sum += q_acc[q_idx] * k_acc[k_idx];
+            const int k_row = j_start + kj;
+            if (k_row >= N) {
+                S[qi][kj] = -INFINITY;
+                continue;
             }
-            S[qi][kj] = sum * scale;
+
+            if (masked && k_row > q_row) {
+                S[qi][kj] = -INFINITY;
+                continue;
+            }
+
+            float score = 0.0f;
+            for (int k = 0; k < d; ++k) {
+                score += Q[q_row * d + k] * K[k_row * d + k];
+            }
+            S[qi][kj] = score * scale;
         }
     }
-    
-    // 2. Compute local maximum and exponentials
-    T m_local[Br];
-    T l_local[Br];
-    T P[Br][Bc] = {{0}};
-    
+
     for (int qi = 0; qi < Br; ++qi) {
-        if (i_start + qi >= N) continue;
-        
-        // Find maximum in row
+        const int q_row = i_start + qi;
+        if (q_row >= N) {
+            continue;
+        }
+
         m_local[qi] = -INFINITY;
         for (int kj = 0; kj < Bc; ++kj) {
-            if (j_start + kj >= N) continue;
-            if (masked && j_start + kj > i_start + qi) continue;
-            m_local[qi] = sycl::max(m_local[qi], S[qi][kj]);
+            if (j_start + kj < N) {
+                m_local[qi] = sycl::fmax(m_local[qi], S[qi][kj]);
+            }
         }
-        
-        // Compute exponentials and local sum
-        l_local[qi] = 0;
+
+        l_local[qi] = 0.0f;
         for (int kj = 0; kj < Bc; ++kj) {
-            if (j_start + kj >= N) continue;
-            if (masked && j_start + kj > i_start + qi) continue;
-            
-            P[qi][kj] = sycl::exp(S[qi][kj] - m_local[qi]);
-            l_local[qi] += P[qi][kj];
+            if (j_start + kj < N && !sycl::isinf(S[qi][kj])) {
+                P[qi][kj] = sycl::exp(S[qi][kj] - m_local[qi]);
+                l_local[qi] += P[qi][kj];
+            } else {
+                P[qi][kj] = 0.0f;
+            }
         }
     }
-    
-    // 3. Update accumulators and compute output
+
     for (int qi = 0; qi < Br; ++qi) {
-        int q_idx = i_start + qi;
-        if (q_idx >= N) continue;
-        
-        // Update m and l
-        T m_old = m_acc[q_idx];
-        T m_new = sycl::max(m_old, m_local[qi]);
-        T l_new = sycl::exp(m_old - m_new) * l_acc[q_idx] + 
-                  sycl::exp(m_local[qi] - m_new) * l_local[qi];
-        
-        // Update output
-        for (int k = 0; k < d; ++k) {
-            T acc = 0;
-            for (int kj = 0; kj < Bc; ++kj) {
-                if (j_start + kj >= N) continue;
-                if (masked && j_start + kj > q_idx) continue;
-                
-                int v_idx = (j_start + kj) * d + k;
-                acc += P[qi][kj] * v_acc[v_idx];
-            }
-            
-            int o_idx = q_idx * d + k;
-            T old_val = out_acc[o_idx];
-            T weighted = sycl::exp(m_old - m_new) * old_val;
-            out_acc[o_idx] = (weighted + sycl::exp(m_local[qi] - m_new) * acc) / l_new;
+        const int q_row = i_start + qi;
+        if (q_row >= N) {
+            continue;
         }
-        
-        // Store updated l and m
-        l_acc[q_idx] = l_new;
-        m_acc[q_idx] = m_new;
+
+        const float m_old = m[q_row];
+        const float m_new = sycl::fmax(m_old, m_local[qi]);
+        const float l_old = l[q_row];
+        const float l_new = sycl::exp(m_old - m_new) * l_old + sycl::exp(m_local[qi] - m_new) * l_local[qi];
+
+        const float correction_old = sycl::exp(m_old - m_new);
+        const float correction_new = sycl::exp(m_local[qi] - m_new);
+
+        for (int k = 0; k < d; ++k) {
+            float pv = 0.0f;
+            for (int kj = 0; kj < Bc; ++kj) {
+                const int v_row = j_start + kj;
+                if (v_row < N) {
+                    pv += P[qi][kj] * V[v_row * d + k];
+                }
+            }
+
+            const int o_idx = q_row * d + k;
+            O[o_idx]        = (correction_old * O[o_idx] + correction_new * pv) / l_new;
+        }
+
+        l[q_row] = l_new;
+        m[q_row] = m_new;
     }
 }

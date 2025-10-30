@@ -1,102 +1,78 @@
 #include "flash-attn-sycl.h"
-#include "ggml-backend-sycl.h"
+
 #include "kernels/flash-attn-kernel.h"
 
-#include <assert.h>
-#include <stdexcept>
-#include <vector>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <sycl/sycl.hpp>
 
-// Flash attention implementation
-void ggml_sycl_flash_attn(
-    struct ggml_tensor * q,
-    struct ggml_tensor * k,
-    struct ggml_tensor * v,
-    struct ggml_tensor * out,
-    bool masked,
-    float scale
-) {
-    GGML_ASSERT(q != nullptr);
-    GGML_ASSERT(k != nullptr);
-    GGML_ASSERT(v != nullptr);
-    GGML_ASSERT(out != nullptr);
+#define FLASH_ATTN_BR_MAX 32
+#define FLASH_ATTN_BC_MAX 32
+
+// Flash Attention: https://arxiv.org/abs/2205.14135
+void ggml_sycl_op_flash_attn(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * Q    = dst->src[0];
+    const ggml_tensor * K    = dst->src[1];
+    const ggml_tensor * V    = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+
+    GGML_ASSERT(Q != nullptr);
+    GGML_ASSERT(K != nullptr);
+    GGML_ASSERT(V != nullptr);
+    GGML_ASSERT(dst != nullptr);
+
+    GGML_ASSERT(Q->type == GGML_TYPE_F32);
+    GGML_ASSERT(K->type == GGML_TYPE_F32);
+    GGML_ASSERT(V->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const float * Q_d   = (const float *) Q->data;
+    const float * K_d   = (const float *) K->data;
+    const float * V_d   = (const float *) V->data;
+    float *       dst_d = (float *) dst->data;
+
+    dpct::queue_ptr stream = ctx.stream();
+
+    const int64_t d = Q->ne[0];
+    const int64_t N = Q->ne[1];
+
+    float scale;
+    float max_bias;
+    float logit_softcap;
     
-    // Get tensor dimensions
-    const int64_t N = q->ne[1]; // sequence length
-    const int64_t d = q->ne[0]; // head dimension
-    
-    // Block sizes (from Flash Attention paper)
-    const int Bc = GGML_SYCL_FLASH_BLOCK_SIZE / (4 * d);  // Key/Value block size
-    const int Br = std::min(Bc, (int)d);                  // Query block size
-    
-    // Number of blocks
-    const int Tr = (N + Br - 1) / Br;  // Number of Q blocks
-    const int Tc = (N + Bc - 1) / Bc;  // Number of K/V blocks
-    
-    try {
-        sycl::queue& q = ggml_sycl_get_queue();
-        
-        // Create SYCL buffers for tensors
-        sycl::buffer<float> q_buf(
-            reinterpret_cast<float*>(q->data),
-            sycl::range<1>(N * d)
-        );
-        sycl::buffer<float> k_buf(
-            reinterpret_cast<float*>(k->data),
-            sycl::range<1>(N * d)
-        );
-        sycl::buffer<float> v_buf(
-            reinterpret_cast<float*>(v->data),
-            sycl::range<1>(N * d)
-        );
-        sycl::buffer<float> out_buf(
-            reinterpret_cast<float*>(out->data),
-            sycl::range<1>(N * d)
-        );
-        
-        // Allocate and initialize auxiliary buffers
-        std::vector<float> l(N, 0.0f);
-        std::vector<float> m(N, -INFINITY);
-        
-        sycl::buffer<float> l_buf(l.data(), sycl::range<1>(N));
-        sycl::buffer<float> m_buf(m.data(), sycl::range<1>(N));
-        
-        // Main Flash Attention loop
-        for (int j = 0; j < Tc; ++j) {
-            q.submit([&](sycl::handler& h) {
-                auto q_acc = q_buf.get_access<sycl::access::mode::read>(h);
-                auto k_acc = k_buf.get_access<sycl::access::mode::read>(h);
-                auto v_acc = v_buf.get_access<sycl::access::mode::read>(h);
-                auto out_acc = out_buf.get_access<sycl::access::mode::read_write>(h);
-                auto l_acc = l_buf.get_access<sycl::access::mode::read_write>(h);
-                auto m_acc = m_buf.get_access<sycl::access::mode::read_write>(h);
-                
-                // Launch kernel
-                h.parallel_for(sycl::range<1>(Tr), [=](sycl::id<1> i) {
-                    run_flash_attn_block(
-                        k_acc, v_acc, q_acc, out_acc,
-                        l_acc, m_acc,
-                        i[0], j,
-                        Br, Bc, N, d,
-                        masked,
-                        scale
-                    );
-                });
+    std::memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
+    std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
+    std::memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
+
+    const bool masked = (mask != nullptr);
+
+    const int Br = std::min((int) FLASH_ATTN_BR_MAX, (int) N);
+    const int Bc = std::min((int) FLASH_ATTN_BC_MAX, (int) N);
+
+    const int Tr = (N + Br - 1) / Br;
+    const int Tc = (N + Bc - 1) / Bc;
+
+    float * l_d = (float *) sycl::malloc_device(N * sizeof(float), *stream);
+    float * m_d = (float *) sycl::malloc_device(N * sizeof(float), *stream);
+
+    stream->fill(l_d, 0.0f, N);
+    stream->fill(m_d, -std::numeric_limits<float>::infinity(), N);
+    stream->fill(dst_d, 0.0f, N * d);
+    stream->wait();
+
+    for (int j = 0; j < Tc; ++j) {
+        stream->submit([&](sycl::handler & cgh) {
+            cgh.parallel_for(sycl::range<1>(Tr), [=](sycl::id<1> idx) {
+                const int i = idx[0];
+                flash_attn_tiled_kernel<FLASH_ATTN_BR_MAX, FLASH_ATTN_BC_MAX>(Q_d, K_d, V_d, dst_d, l_d, m_d, i, j, Br,
+                                                                              Bc, N, d, masked, scale);
             });
-        }
-        
-    } catch (sycl::exception const& e) {
-        fprintf(stderr, "SYCL exception in flash attention: %s\n", e.what());
-        throw;
+        });
     }
-}
 
-// Initialize flash attention backend
-void ggml_sycl_flash_attn_init(void) {
-    // Register with ggml backend
-    struct ggml_backend_sycl_flash_attn_context * ctx = 
-        (struct ggml_backend_sycl_flash_attn_context *)malloc(sizeof(struct ggml_backend_sycl_flash_attn_context));
-    
-    ctx->compute_forward = ggml_sycl_flash_attn;
-    
-    ggml_backend_register(GGML_BACKEND_TYPE_SYCL_FLASH_ATTN, ctx);
+    stream->wait();
+
+    sycl::free(l_d, *stream);
+    sycl::free(m_d, *stream);
 }
