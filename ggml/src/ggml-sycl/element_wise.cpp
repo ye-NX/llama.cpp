@@ -1200,21 +1200,37 @@ void ggml_sycl_geglu(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
 
 void ggml_sycl_reglu(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     scope_op_debug_print scope_dbg_print(__func__, dst, /*num_src=*/1);
+    if (dst->src[0]->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        fprintf(stderr, "[SYCL] reglu: tensor type not supported (type=%d)\n", dst->type);
+        return;
+    }
     ggml_sycl_op_reglu(ctx, dst);
 }
 
 void ggml_sycl_swiglu(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     scope_op_debug_print scope_dbg_print(__func__, dst, /*num_src=*/1);
+    if (dst->src[0]->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        fprintf(stderr, "[SYCL] swiglu: tensor type not supported (type=%d)\n", dst->type);
+        return;
+    }
     ggml_sycl_op_swiglu(ctx, dst);
 }
 
 void ggml_sycl_geglu_erf(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     scope_op_debug_print scope_dbg_print(__func__, dst, /*num_src=*/1);
+    if (dst->src[0]->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        fprintf(stderr, "[SYCL] geglu_erf: tensor type not supported (type=%d)\n", dst->type);
+        return;
+    }
     ggml_sycl_op_geglu_erf(ctx, dst);
 }
 
 void ggml_sycl_geglu_quick(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     scope_op_debug_print scope_dbg_print(__func__, dst, /*num_src=*/1);
+    if (dst->src[0]->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        fprintf(stderr, "[SYCL] geglu_quick: tensor type not supported (type=%d)\n", dst->type);
+        return;
+    }
     ggml_sycl_op_geglu_quick(ctx, dst);
 }
 

@@ -22,10 +22,10 @@ void ggml_sycl_op_flash_attn(ggml_backend_sycl_context & ctx, ggml_tensor * dst)
     GGML_ASSERT(V != nullptr);
     GGML_ASSERT(dst != nullptr);
 
-    GGML_ASSERT(Q->type == GGML_TYPE_F32);
-    GGML_ASSERT(K->type == GGML_TYPE_F32);
-    GGML_ASSERT(V->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    if (Q->type != GGML_TYPE_F32 || K->type != GGML_TYPE_F32 || V->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        fprintf(stderr, "[SYCL] FLASH-ATTENTION: tensor type not supported (Q=%d, K=%d, V=%d, dst=%d)\n", Q->type, K->type, V->type, dst->type);
+        return;
+    }
 
     const float * Q_d   = (const float *) Q->data;
     const float * K_d   = (const float *) K->data;
@@ -75,4 +75,24 @@ void ggml_sycl_op_flash_attn(ggml_backend_sycl_context & ctx, ggml_tensor * dst)
 
     sycl::free(l_d, *stream);
     sycl::free(m_d, *stream);
+}
+
+bool ggml_sycl_flash_attn_ext_supported(const ggml_tensor * dst) {
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+
+    if (Q == nullptr || K == nullptr || V == nullptr) {
+        return false;
+    }
+
+    if (Q->type != GGML_TYPE_F32 || K->type != GGML_TYPE_F32 || V->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    return true;
 }

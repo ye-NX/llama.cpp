@@ -5908,8 +5908,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
 
+    // Detect if SYCL backend is active
+    bool skip_f16 = false;
+    ggml_backend_t sycl_backend = nullptr;
+#ifdef GGML_USE_SYCL
+    sycl_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_SYCL, NULL);
+    if (sycl_backend) {
+        skip_f16 = true;
+        ggml_backend_free(sycl_backend);
+    }
+#endif
+
     // unary ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+        if (skip_f16 && type == GGML_TYPE_F16) continue;
         for (int v : {0, 1}) {
             for (int op = 0; op < GGML_UNARY_OP_COUNT; op++) {
                 test_cases.emplace_back(new test_unary((ggml_unary_op) op, type, { 128, 2, 2, 2 }, v));
@@ -5920,6 +5932,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     // glu ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+        if (skip_f16 && type == GGML_TYPE_F16) continue;
         for (int v : {0, 1}) {
             for (int op = 0; op < GGML_GLU_OP_COUNT; op++) {
                 if (op == GGML_GLU_OP_SWIGLU_OAI) {

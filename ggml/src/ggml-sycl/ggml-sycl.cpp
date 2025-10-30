@@ -4505,7 +4505,7 @@ static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_ARGSORT:
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_FLASH_ATTN_EXT:
-            return true;
+            return ggml_sycl_flash_attn_ext_supported(op);
         case GGML_OP_POOL_2D:
         case GGML_OP_ACC:
             return true;
