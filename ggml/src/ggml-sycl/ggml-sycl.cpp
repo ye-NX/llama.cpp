@@ -3865,7 +3865,7 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
 } catch (sycl::exception & e) {
     std::cerr << e.what() << "Exception caught at file:" << __FILE__ << ", line:" << __LINE__ << std::endl;
     std::cerr << "Error OP "<<ggml_op_name(dst->op)<< std::endl;
-    std::exit(1);
+    return false;
 }
 
 GGML_API void ggml_backend_sycl_get_device_description(int device, char *description,
